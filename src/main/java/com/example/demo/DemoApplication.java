@@ -1,6 +1,7 @@
 package com.example.demo;
 
 import com.drew.metadata.mov.atoms.Atom;
+import lombok.extern.slf4j.Slf4j;
 import org.apache.pdfbox.io.MemoryUsageSetting;
 import org.apache.pdfbox.multipdf.Splitter;
 import org.apache.pdfbox.pdmodel.PDDocument;
@@ -17,12 +18,14 @@ import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.*;
 
 
 @SpringBootApplication
+@Slf4j
 public class DemoApplication {
 
     public static void main(String[] args) {
@@ -42,8 +45,9 @@ public class DemoApplication {
 
             List<PDDocument> split = splitter.split(document);
 
-            var map = new ConcurrentHashMap<Integer, byte[]>();
+            final Map<Integer,byte[]> map = new ConcurrentHashMap<Integer, byte[]>();
             for (int i = 0; i < split.size(); i++) {
+
                 var doc = split.get(i);
                 ByteArrayOutputStream baos = new ByteArrayOutputStream();
                 try {
@@ -52,14 +56,15 @@ public class DemoApplication {
                 } catch (IOException e) {
                     throw new RuntimeException(e);
                 }
-                map.put(i, baos.toByteArray());
+                map.putIfAbsent(i, baos.toByteArray());
             }
 
             document.close();
 
-            var exec = Executors.newCachedThreadPool();
+            var exec = Executors.newFixedThreadPool(10);
+            List<Callable<Void>> jobs = new ArrayList<>();
             for(Map.Entry<Integer, byte[]> entry:map.entrySet()){
-                exec.execute(() -> {
+                jobs.add(() -> {
                     byte[] arr = entry.getValue();
                     System.out.println(Thread.currentThread() + "started rendering " + OffsetDateTime.now());
                     File preview = null;
@@ -70,14 +75,11 @@ public class DemoApplication {
                     } catch (IOException e) {
                         throw new RuntimeException(e);
                     }
-
-                    try {
                         preview = Files.createFile(Paths.get("src/output/w" + entry.getKey())).toFile();
                         thumbnail = Files.createFile(Paths.get("src/output/i" + entry.getKey())).toFile();
 
-                        FileOutputStream previewFOS = new FileOutputStream(preview);
-                        FileOutputStream thumbnailFOS = new FileOutputStream(thumbnail);
-
+                    try (FileOutputStream previewFOS = new FileOutputStream(preview);
+                         FileOutputStream thumbnailFOS = new FileOutputStream(thumbnail)) {
                         PDFRenderer renderer = new PDFRenderer(doc);
 
                         var renderedPreview = scalePdfPreview(renderer.renderImageWithDPI(0, 600),
@@ -97,8 +99,23 @@ public class DemoApplication {
                         }
                         System.out.println(Thread.currentThread() + "finished rendering at " + OffsetDateTime.now());
                     }
+                    return null;
                 });
             }
+
+            exec.invokeAll(jobs);
+            exec.shutdown();
+            try {
+                if (!exec.awaitTermination(1000, TimeUnit.MILLISECONDS)) {
+                    exec.shutdownNow();
+                }
+            } catch (InterruptedException e) {
+                exec.shutdownNow();
+            }
+
+            log.info("Jobs completely finished at {}", OffsetDateTime.now());
+            log.info("Executor is shut down: {}", exec.isShutdown());
+            log.info("Executor is terminated: {}", exec.isTerminated());
         };
     }
 
